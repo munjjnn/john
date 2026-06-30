@@ -23,15 +23,17 @@ export interface MarketWindow {
   tokens: [TokenBook, TokenBook];  // exactly two outcomes
 }
 
-interface GammaMarket {
-  conditionId: string;
+interface GammaEventMarket {
+  conditionId?: string;
+  clobTokenIds?: string | string[];
+  outcomes?: string | string[];
+  question?: string;
+}
+
+interface GammaEvent {
   slug: string;
-  question: string;
-  startDate: string;
-  endDate: string;
-  active: boolean;
-  closed: boolean;
-  tokens: Array<{ tokenId: string; outcome: string }>;
+  title?: string;
+  markets?: GammaEventMarket[];
 }
 
 interface ClobOrderBook {
@@ -39,38 +41,58 @@ interface ClobOrderBook {
   asks: Array<{ price: string; size: string }>;
 }
 
-async function fetchActiveMarkets(): Promise<GammaMarket[]> {
-  const prefixes = config.marketSlugPrefixes;
-  const results: GammaMarket[] = [];
+// Each scan prefix like "btc-updown-15m" encodes an interval in its suffix.
+// The recurring crypto Up/Down markets are NOT in the general market search;
+// each window is a separate event whose slug is the prefix plus the Unix
+// timestamp of the window's start, rounded down to the interval boundary:
+//   <prefix>-<floor(now / intervalSec) * intervalSec>
+function intervalSeconds(prefix: string): number {
+  if (prefix.endsWith("-5m")) return 300;
+  if (prefix.endsWith("-15m")) return 900;
+  if (prefix.endsWith("-1h") || prefix.endsWith("-60m")) return 3600;
+  return 900;
+}
 
-  for (const prefix of prefixes) {
-    try {
-      const resp = await axios.get<{ markets: GammaMarket[] }>(
-        `${config.gammaApiUrl}/markets`,
-        {
-          params: { slug_prefix: prefix, active: true, closed: false },
-          timeout: 10_000,
-        }
-      );
-      const markets = resp.data?.markets ?? (resp.data as unknown as GammaMarket[]);
-      const arr = Array.isArray(markets) ? markets : [];
-      results.push(...arr);
-    } catch (err) {
-      console.error(`[scanner] Failed to fetch markets for prefix "${prefix}":`, err);
-    }
+function windowSlugs(prefix: string): { slug: string; start: number; end: number }[] {
+  const interval = intervalSeconds(prefix);
+  const now = Math.floor(Date.now() / 1000);
+  const current = Math.floor(now / interval) * interval;
+  // current open window, plus the next one (often already tradable)
+  return [current, current + interval].map((start) => ({
+    slug: `${prefix}-${start}`,
+    start,
+    end: start + interval,
+  }));
+}
+
+function parseStringArray(v: string | string[] | undefined): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  try {
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
+}
 
-  return results;
+async function fetchEvent(slug: string): Promise<GammaEvent | null> {
+  try {
+    const resp = await axios.get<GammaEvent>(
+      `${config.gammaApiUrl}/events/slug/${slug}`,
+      { timeout: 10_000 }
+    );
+    return resp.data ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchOrderBook(tokenId: string): Promise<ClobOrderBook | null> {
   try {
     const resp = await axios.get<ClobOrderBook>(
       `${config.clobApiUrl}/book`,
-      {
-        params: { token_id: tokenId },
-        timeout: 8_000,
-      }
+      { params: { token_id: tokenId }, timeout: 8_000 }
     );
     return resp.data;
   } catch {
@@ -90,74 +112,68 @@ function bestAsk(asks: OrderBookLevel[]): number {
   return Math.min(...asks.map((a) => a.price));
 }
 
-function windowBounds(market: GammaMarket): { start: Date; end: Date } {
-  const start = new Date(market.startDate);
-  const end = new Date(market.endDate);
-  return { start, end };
-}
-
-function isInTradingWindow(start: Date, end: Date): boolean {
+function isInTradingWindow(startSec: number, endSec: number): boolean {
   const now = Date.now();
-  const windowMs = end.getTime() - start.getTime();
-  const elapsedMs = now - start.getTime();
-  const elapsedMin = elapsedMs / 60_000;
+  const start = startSec * 1000;
+  const end = endSec * 1000;
+  if (now < start || now >= end) return false;
 
-  if (elapsedMs < 0 || now >= end.getTime()) return false;
+  const windowMin = (end - start) / 60_000;
+  const elapsedMin = (now - start) / 60_000;
 
-  const min = config.minutesBeforeCloseMin;
-  const max = config.minutesBeforeCloseMax;
-  const windowMin = windowMs / 60_000;
-
-  // Convert window-position config to elapsed-minutes filter
-  // minutesBeforeCloseMin/Max describe how many minutes into the window we allow
-  const tradeMin = windowMin - max;
-  const tradeMax = windowMin - min;
+  const tradeMin = windowMin - config.minutesBeforeCloseMax;
+  const tradeMax = windowMin - config.minutesBeforeCloseMin;
 
   return elapsedMin >= Math.max(0, tradeMin) && elapsedMin <= tradeMax;
 }
 
 export async function scanMarkets(): Promise<MarketWindow[]> {
-  const raw = await fetchActiveMarkets();
   const windows: MarketWindow[] = [];
 
-  for (const m of raw) {
-    if (!m.tokens || m.tokens.length !== 2) continue;
+  for (const prefix of config.marketSlugPrefixes) {
+    for (const { slug, start, end } of windowSlugs(prefix)) {
+      if (!isInTradingWindow(start, end)) continue;
 
-    const { start, end } = windowBounds(m);
-    if (!isInTradingWindow(start, end)) continue;
+      const event = await fetchEvent(slug);
+      const market = event?.markets?.[0];
+      if (!market) continue;
 
-    const [bookA, bookB] = await Promise.all([
-      fetchOrderBook(m.tokens[0].tokenId),
-      fetchOrderBook(m.tokens[1].tokenId),
-    ]);
+      const tokenIds = parseStringArray(market.clobTokenIds);
+      const outcomes = parseStringArray(market.outcomes);
+      if (tokenIds.length !== 2 || outcomes.length !== 2) continue;
 
-    if (!bookA || !bookB) continue;
+      const [bookA, bookB] = await Promise.all([
+        fetchOrderBook(tokenIds[0]),
+        fetchOrderBook(tokenIds[1]),
+      ]);
+      if (!bookA || !bookB) continue;
 
-    const tokenBooks: [TokenBook, TokenBook] = [
-      {
-        tokenId: m.tokens[0].tokenId,
-        outcome: m.tokens[0].outcome,
-        bids: parseLevels(bookA.bids),
-        asks: parseLevels(bookA.asks),
-        bestAsk: bestAsk(parseLevels(bookA.asks)),
-      },
-      {
-        tokenId: m.tokens[1].tokenId,
-        outcome: m.tokens[1].outcome,
-        bids: parseLevels(bookB.bids),
-        asks: parseLevels(bookB.asks),
-        bestAsk: bestAsk(parseLevels(bookB.asks)),
-      },
-    ];
+      const tokens: [TokenBook, TokenBook] = [
+        {
+          tokenId: tokenIds[0],
+          outcome: outcomes[0],
+          bids: parseLevels(bookA.bids),
+          asks: parseLevels(bookA.asks),
+          bestAsk: bestAsk(parseLevels(bookA.asks)),
+        },
+        {
+          tokenId: tokenIds[1],
+          outcome: outcomes[1],
+          bids: parseLevels(bookB.bids),
+          asks: parseLevels(bookB.asks),
+          bestAsk: bestAsk(parseLevels(bookB.asks)),
+        },
+      ];
 
-    windows.push({
-      conditionId: m.conditionId,
-      slug: m.slug,
-      question: m.question,
-      startTime: start,
-      endTime: end,
-      tokens: tokenBooks,
-    });
+      windows.push({
+        conditionId: market.conditionId ?? slug,
+        slug,
+        question: event?.title ?? market.question ?? slug,
+        startTime: new Date(start * 1000),
+        endTime: new Date(end * 1000),
+        tokens,
+      });
+    }
   }
 
   return windows;
