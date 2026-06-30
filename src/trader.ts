@@ -4,6 +4,7 @@ import { config } from "./config";
 import { WindowPlan, OrderIntent, PriceLevel } from "./strategy";
 
 let _client: ClobClient | null = null;
+let _clientPromise: Promise<ClobClient> | null = null;
 
 function sigType(n: number): SignatureType {
   switch (n) {
@@ -14,21 +15,43 @@ function sigType(n: number): SignatureType {
   }
 }
 
-function getClient(): ClobClient {
-  if (_client) return _client;
-
+// Posting orders requires L2 (API-key) auth. The CLOB client throws
+// L2_AUTH_NOT_AVAILABLE unless it was constructed with creds, so we first
+// build an L1-only client, derive/create the API key from the wallet
+// signature, then rebuild the client with those creds.
+async function buildClient(): Promise<ClobClient> {
   const wallet = new ethers.Wallet(config.privateKey);
 
-  _client = new ClobClient(
+  const l1 = new ClobClient(
     config.clobApiUrl,
     137,            // Polygon mainnet
     wallet,
-    undefined,      // creds (API key) — derived from wallet
+    undefined,
     sigType(config.signatureType),
     config.funderAddress
   );
 
-  return _client;
+  const creds = await l1.createOrDeriveApiKey();
+
+  return new ClobClient(
+    config.clobApiUrl,
+    137,
+    wallet,
+    creds,
+    sigType(config.signatureType),
+    config.funderAddress
+  );
+}
+
+async function getClient(): Promise<ClobClient> {
+  if (_client) return _client;
+  if (!_clientPromise) {
+    _clientPromise = buildClient().then((c) => {
+      _client = c;
+      return c;
+    });
+  }
+  return _clientPromise;
 }
 
 async function submitLevel(
@@ -45,7 +68,7 @@ async function submitLevel(
   }
 
   try {
-    const client = getClient();
+    const client = await getClient();
 
     const signed = await client.createOrder({
       tokenID: intent.tokenId,
