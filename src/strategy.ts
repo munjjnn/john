@@ -20,7 +20,7 @@ export interface WindowPlan {
   orders: OrderIntent[];
 }
 
-function centRange(min: number, max: number, step = 0.01): number[] {
+export function centRange(min: number, max: number, step = 0.01): number[] {
   const prices: number[] = [];
   for (let p = min; p <= max + 1e-9; p += step) {
     prices.push(Math.round(p * 100) / 100);
@@ -28,7 +28,7 @@ function centRange(min: number, max: number, step = 0.01): number[] {
   return prices;
 }
 
-function sharesFor(usdcBudget: number, price: number): number {
+export function sharesFor(usdcBudget: number, price: number): number {
   const raw = usdcBudget / price;
   return Math.min(Math.round(raw), config.maxSharesPerOrder);
 }

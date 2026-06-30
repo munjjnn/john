@@ -46,14 +46,14 @@ interface ClobOrderBook {
 // each window is a separate event whose slug is the prefix plus the Unix
 // timestamp of the window's start, rounded down to the interval boundary:
 //   <prefix>-<floor(now / intervalSec) * intervalSec>
-function intervalSeconds(prefix: string): number {
+export function intervalSeconds(prefix: string): number {
   if (prefix.endsWith("-5m")) return 300;
   if (prefix.endsWith("-15m")) return 900;
   if (prefix.endsWith("-1h") || prefix.endsWith("-60m")) return 3600;
   return 900;
 }
 
-function windowSlugs(prefix: string): { slug: string; start: number; end: number }[] {
+export function windowSlugs(prefix: string): { slug: string; start: number; end: number }[] {
   const interval = intervalSeconds(prefix);
   const now = Math.floor(Date.now() / 1000);
   const current = Math.floor(now / interval) * interval;
@@ -65,7 +65,7 @@ function windowSlugs(prefix: string): { slug: string; start: number; end: number
   }));
 }
 
-function parseStringArray(v: string | string[] | undefined): string[] {
+export function parseStringArray(v: string | string[] | undefined): string[] {
   if (!v) return [];
   if (Array.isArray(v)) return v;
   try {
@@ -107,12 +107,12 @@ function parseLevels(raw: Array<{ price: string; size: string }>): OrderBookLeve
   }));
 }
 
-function bestAsk(asks: OrderBookLevel[]): number {
+export function bestAsk(asks: OrderBookLevel[]): number {
   if (asks.length === 0) return 1;
   return Math.min(...asks.map((a) => a.price));
 }
 
-function isInTradingWindow(startSec: number, endSec: number): boolean {
+export function isInTradingWindow(startSec: number, endSec: number): boolean {
   const now = Date.now();
   const start = startSec * 1000;
   const end = endSec * 1000;
