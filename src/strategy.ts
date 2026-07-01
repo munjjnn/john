@@ -33,6 +33,13 @@ export function sharesFor(usdcBudget: number, price: number): number {
   return Math.min(Math.round(raw), config.maxSharesPerOrder);
 }
 
+// Stable identity for a single resting order (one condition, one token, one
+// price). Used both to skip levels already posted this session and to record
+// them once a submission actually succeeds.
+export function postedKey(conditionId: string, tokenId: string, price: number): string {
+  return `${conditionId}:${tokenId}:${price}`;
+}
+
 export function buildPlan(market: MarketWindow, posted: Set<string>): WindowPlan | null {
   const [tokenA, tokenB] = market.tokens;
 
@@ -43,10 +50,7 @@ export function buildPlan(market: MarketWindow, posted: Set<string>): WindowPlan
 
   // ── Cheap (reversal) leg ──────────────────────────────────────────────────
   const cheapPrices = centRange(config.cheapBuyMin, config.cheapBuyMax)
-    .filter((p) => {
-      const key = `${market.conditionId}:${underdog.tokenId}:${p}`;
-      return !posted.has(key);
-    });
+    .filter((p) => !posted.has(postedKey(market.conditionId, underdog.tokenId, p)));
 
   if (cheapPrices.length > 0) {
     orders.push({
@@ -63,10 +67,7 @@ export function buildPlan(market: MarketWindow, posted: Set<string>): WindowPlan
   // ── Expensive (hedge) leg ─────────────────────────────────────────────────
   if (config.enableExpensiveHedge) {
     const expPrices = centRange(config.expensiveBuyMin, config.expensiveBuyMax)
-      .filter((p) => {
-        const key = `${market.conditionId}:${favorite.tokenId}:${p}`;
-        return !posted.has(key);
-      });
+      .filter((p) => !posted.has(postedKey(market.conditionId, favorite.tokenId, p)));
 
     if (expPrices.length > 0) {
       orders.push({
@@ -89,7 +90,7 @@ export function buildPlan(market: MarketWindow, posted: Set<string>): WindowPlan
 export function markPosted(plan: WindowPlan, posted: Set<string>): void {
   for (const order of plan.orders) {
     for (const level of order.levels) {
-      posted.add(`${plan.market.conditionId}:${order.tokenId}:${level.price}`);
+      posted.add(postedKey(plan.market.conditionId, order.tokenId, level.price));
     }
   }
 }

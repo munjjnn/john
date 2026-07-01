@@ -23,20 +23,20 @@ export interface MarketWindow {
   tokens: [TokenBook, TokenBook];  // exactly two outcomes
 }
 
-interface GammaEventMarket {
+export interface GammaEventMarket {
   conditionId?: string;
   clobTokenIds?: string | string[];
   outcomes?: string | string[];
   question?: string;
 }
 
-interface GammaEvent {
+export interface GammaEvent {
   slug: string;
   title?: string;
   markets?: GammaEventMarket[];
 }
 
-interface ClobOrderBook {
+export interface ClobOrderBook {
   bids: Array<{ price: string; size: string }>;
   asks: Array<{ price: string; size: string }>;
 }
@@ -112,6 +112,50 @@ export function bestAsk(asks: OrderBookLevel[]): number {
   return Math.min(...asks.map((a) => a.price));
 }
 
+function toTokenBook(tokenId: string, outcome: string, book: ClobOrderBook): TokenBook {
+  const asks = parseLevels(book.asks);
+  return {
+    tokenId,
+    outcome,
+    bids: parseLevels(book.bids),
+    asks,
+    bestAsk: bestAsk(asks),
+  };
+}
+
+// Pure assembly of a MarketWindow from an already-fetched event and its two
+// order books. Kept separate from the network fetch so it can be tested with
+// fixtures. Returns null if the event does not describe a two-outcome market.
+export function assembleWindow(
+  slug: string,
+  start: number,
+  end: number,
+  event: GammaEvent,
+  bookA: ClobOrderBook,
+  bookB: ClobOrderBook
+): MarketWindow | null {
+  const market = event?.markets?.[0];
+  if (!market) return null;
+
+  const tokenIds = parseStringArray(market.clobTokenIds);
+  const outcomes = parseStringArray(market.outcomes);
+  if (tokenIds.length !== 2 || outcomes.length !== 2) return null;
+
+  const tokens: [TokenBook, TokenBook] = [
+    toTokenBook(tokenIds[0], outcomes[0], bookA),
+    toTokenBook(tokenIds[1], outcomes[1], bookB),
+  ];
+
+  return {
+    conditionId: market.conditionId ?? slug,
+    slug,
+    question: event.title ?? market.question ?? slug,
+    startTime: new Date(start * 1000),
+    endTime: new Date(end * 1000),
+    tokens,
+  };
+}
+
 export function isInTradingWindow(startSec: number, endSec: number): boolean {
   const now = Date.now();
   const start = startSec * 1000;
@@ -136,11 +180,10 @@ export async function scanMarkets(): Promise<MarketWindow[]> {
 
       const event = await fetchEvent(slug);
       const market = event?.markets?.[0];
-      if (!market) continue;
+      if (!event || !market) continue;
 
       const tokenIds = parseStringArray(market.clobTokenIds);
-      const outcomes = parseStringArray(market.outcomes);
-      if (tokenIds.length !== 2 || outcomes.length !== 2) continue;
+      if (tokenIds.length !== 2) continue;
 
       const [bookA, bookB] = await Promise.all([
         fetchOrderBook(tokenIds[0]),
@@ -148,31 +191,8 @@ export async function scanMarkets(): Promise<MarketWindow[]> {
       ]);
       if (!bookA || !bookB) continue;
 
-      const tokens: [TokenBook, TokenBook] = [
-        {
-          tokenId: tokenIds[0],
-          outcome: outcomes[0],
-          bids: parseLevels(bookA.bids),
-          asks: parseLevels(bookA.asks),
-          bestAsk: bestAsk(parseLevels(bookA.asks)),
-        },
-        {
-          tokenId: tokenIds[1],
-          outcome: outcomes[1],
-          bids: parseLevels(bookB.bids),
-          asks: parseLevels(bookB.asks),
-          bestAsk: bestAsk(parseLevels(bookB.asks)),
-        },
-      ];
-
-      windows.push({
-        conditionId: market.conditionId ?? slug,
-        slug,
-        question: event?.title ?? market.question ?? slug,
-        startTime: new Date(start * 1000),
-        endTime: new Date(end * 1000),
-        tokens,
-      });
+      const window = assembleWindow(slug, start, end, event, bookA, bookB);
+      if (window) windows.push(window);
     }
   }
 

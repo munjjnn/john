@@ -1,10 +1,24 @@
 import { config } from "./config";
 import { scanMarkets } from "./market-scanner";
-import { buildPlan, markPosted, WindowPlan } from "./strategy";
+import { buildPlan, WindowPlan } from "./strategy";
 import { executePlan } from "./trader";
 
-// Tracks price levels already posted this session (survives across poll cycles)
+// Tracks price levels already posted this session (survives across poll cycles).
+// Bounded so a long-running process doesn't accumulate keys for closed windows
+// that will never be scanned again.
 const posted = new Set<string>();
+const POSTED_MAX = 5000;
+
+function prunePosted(): void {
+  if (posted.size <= POSTED_MAX) return;
+  const overflow = posted.size - POSTED_MAX;
+  // Sets preserve insertion order, so the oldest keys come first.
+  let i = 0;
+  for (const key of posted) {
+    if (i++ >= overflow) break;
+    posted.delete(key);
+  }
+}
 
 function banner(): void {
   const mode = config.dryRun ? "DRY-RUN" : "LIVE";
@@ -55,9 +69,10 @@ async function tick(): Promise<void> {
   }
 
   for (const plan of plans) {
-    markPosted(plan, posted);
-    await executePlan(plan);
+    await executePlan(plan, posted);
   }
+
+  prunePosted();
 }
 
 async function main(): Promise<void> {

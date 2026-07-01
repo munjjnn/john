@@ -1,7 +1,7 @@
 import { ClobClient, Side, SignatureType, OrderType } from "@polymarket/clob-client";
 import { ethers } from "ethers";
 import { config } from "./config";
-import { WindowPlan, OrderIntent, PriceLevel } from "./strategy";
+import { WindowPlan, OrderIntent, PriceLevel, postedKey } from "./strategy";
 
 let _client: ClobClient | null = null;
 let _clientPromise: Promise<ClobClient> | null = null;
@@ -54,17 +54,20 @@ async function getClient(): Promise<ClobClient> {
   return _clientPromise;
 }
 
+// Returns true only when the level should be considered posted for this
+// session (submitted successfully, or logged once in dry-run). A false result
+// leaves the level eligible for retry on the next tick, so a transient
+// rejection or network error does not silently drop a resting order.
 async function submitLevel(
-  conditionId: string,
   intent: OrderIntent,
   level: PriceLevel
-): Promise<void> {
+): Promise<boolean> {
   const priceStr = level.price.toFixed(2);
   const label = `[${intent.leg.toUpperCase()} ${intent.outcome} @ $${priceStr} × ${level.shares}]`;
 
   if (config.dryRun) {
     console.log(`  [DRY-RUN] Would BUY ${label}`);
-    return;
+    return true;
   }
 
   try {
@@ -81,17 +84,23 @@ async function submitLevel(
 
     if (resp?.success) {
       console.log(`  [TRADE] Placed BUY ${label} → orderId=${resp.orderID ?? resp.orderId}`);
-    } else {
-      const reason = resp?.errorMsg ?? resp?.error ?? JSON.stringify(resp);
-      console.warn(`  [TRADE] Rejected ${label}: ${reason}`);
+      return true;
     }
+
+    const reason = resp?.errorMsg ?? resp?.error ?? JSON.stringify(resp);
+    console.warn(`  [TRADE] Rejected ${label}: ${reason} (will retry)`);
+    return false;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`  [TRADE] Error posting ${label}: ${msg}`);
+    console.error(`  [TRADE] Error posting ${label}: ${msg} (will retry)`);
+    return false;
   }
 }
 
-export async function executePlan(plan: WindowPlan): Promise<void> {
+// Submits every level in the plan and records the ones that actually posted
+// into `posted`, so buildPlan skips them next tick. Levels that fail are left
+// unmarked and will be retried.
+export async function executePlan(plan: WindowPlan, posted: Set<string>): Promise<void> {
   const { market, underdog, favorite, orders } = plan;
 
   console.log(
@@ -107,7 +116,10 @@ export async function executePlan(plan: WindowPlan): Promise<void> {
     );
 
     for (const level of intent.levels) {
-      await submitLevel(market.conditionId, intent, level);
+      const ok = await submitLevel(intent, level);
+      if (ok) {
+        posted.add(postedKey(market.conditionId, intent.tokenId, level.price));
+      }
 
       // brief pause between submissions to respect rate limits
       if (!config.dryRun) {
