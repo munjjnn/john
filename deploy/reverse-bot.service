@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket reverse bot
+After=network-online.target
+Wants=network-online.target
+# Don't hammer Polymarket if the process keeps crash-looping.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Edit these two to match your host:
+User=ubuntu
+WorkingDirectory=/home/ubuntu/reverse-bot
+# .env in WorkingDirectory is loaded by the app itself (dotenv).
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
