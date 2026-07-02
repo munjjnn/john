@@ -1,46 +1,38 @@
-import { ClobClient, Side, SignatureType, OrderType } from "@polymarket/clob-client";
-import { ethers } from "ethers";
+import { ClobClient, Side, OrderType } from "@polymarket/clob-client-v2";
+import { createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
 import { config } from "./config";
 import { WindowPlan, OrderIntent, PriceLevel } from "./strategy";
+
+const CHAIN_ID = 137; // Polygon mainnet
 
 let _client: ClobClient | null = null;
 let _clientPromise: Promise<ClobClient> | null = null;
 
-function sigType(n: number): SignatureType {
-  switch (n) {
-    case 0: return SignatureType.EOA;
-    case 1: return SignatureType.POLY_PROXY;
-    case 2: return SignatureType.POLY_GNOSIS_SAFE;
-    default: return SignatureType.EOA;
-  }
-}
-
-// Posting orders requires L2 (API-key) auth. The CLOB client throws
-// L2_AUTH_NOT_AVAILABLE unless it was constructed with creds, so we first
-// build an L1-only client, derive/create the API key from the wallet
-// signature, then rebuild the client with those creds.
+// Posting orders requires L2 (API-key) auth. Build a signer-only client first,
+// derive/create the API key from the wallet signature, then rebuild the client
+// with those creds so it can sign + post orders.
 async function buildClient(): Promise<ClobClient> {
-  const wallet = new ethers.Wallet(config.privateKey);
+  const pk = (config.privateKey.startsWith("0x")
+    ? config.privateKey
+    : `0x${config.privateKey}`) as `0x${string}`;
 
-  const l1 = new ClobClient(
-    config.clobApiUrl,
-    137,            // Polygon mainnet
-    wallet,
-    undefined,
-    sigType(config.signatureType),
-    config.funderAddress
-  );
+  const account = privateKeyToAccount(pk);
+  const signer = createWalletClient({ account, chain: polygon, transport: http() });
 
-  const creds = await l1.createOrDeriveApiKey();
+  const temp = new ClobClient({ host: config.clobApiUrl, chain: CHAIN_ID, signer });
+  const creds = await temp.createOrDeriveApiKey();
 
-  return new ClobClient(
-    config.clobApiUrl,
-    137,
-    wallet,
+  return new ClobClient({
+    host: config.clobApiUrl,
+    chain: CHAIN_ID,
+    signer,
     creds,
-    sigType(config.signatureType),
-    config.funderAddress
-  );
+    // SignatureTypeV2 is a numeric enum; pass the configured value directly.
+    signatureType: config.signatureType as any,
+    funderAddress: config.funderAddress,
+  });
 }
 
 async function getClient(): Promise<ClobClient> {
@@ -70,9 +62,8 @@ async function submitLevel(
   try {
     const client = await getClient();
 
-    // Newer CLOB protocol requires the market's tick size and neg-risk flag
-    // to be supplied when building the order; omitting them produces an
-    // "invalid order version" rejection from the API.
+    // Newer CLOB protocol requires the market's tick size and neg-risk flag.
+    // Fetch them per token where available; fall back to sane defaults.
     let tickSize: "0.1" | "0.01" | "0.001" | "0.0001" = "0.01";
     let negRisk = false;
     try {
@@ -86,20 +77,21 @@ async function submitLevel(
       /* fall back to false */
     }
 
-    const signed = await client.createOrder(
+    const resp: any = await client.createAndPostOrder(
       {
         tokenID: intent.tokenId,
         price: level.price,
         size: level.shares,
         side: Side.BUY,
       },
-      { tickSize, negRisk }
+      { tickSize, negRisk },
+      OrderType.GTC
     );
 
-    const resp = await client.postOrder(signed, OrderType.GTC);
-
-    if (resp?.success) {
-      console.log(`  [TRADE] Placed BUY ${label} → orderId=${resp.orderID ?? resp.orderId}`);
+    const orderId = resp?.orderID ?? resp?.orderId;
+    const ok = resp?.success === true || Boolean(orderId);
+    if (ok) {
+      console.log(`  [TRADE] Placed BUY ${label} → orderId=${orderId} status=${resp?.status ?? "?"}`);
     } else {
       const reason = resp?.errorMsg ?? resp?.error ?? JSON.stringify(resp);
       console.warn(`  [TRADE] Rejected ${label}: ${reason}`);
