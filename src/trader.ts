@@ -70,12 +70,31 @@ async function submitLevel(
   try {
     const client = await getClient();
 
-    const signed = await client.createOrder({
-      tokenID: intent.tokenId,
-      price: level.price,
-      size: level.shares,
-      side: Side.BUY,
-    });
+    // Newer CLOB protocol requires the market's tick size and neg-risk flag
+    // to be supplied when building the order; omitting them produces an
+    // "invalid order version" rejection from the API.
+    let tickSize: "0.1" | "0.01" | "0.001" | "0.0001" = "0.01";
+    let negRisk = false;
+    try {
+      tickSize = (await client.getTickSize(intent.tokenId)) as typeof tickSize;
+    } catch {
+      /* fall back to 0.01 */
+    }
+    try {
+      negRisk = await client.getNegRisk(intent.tokenId);
+    } catch {
+      /* fall back to false */
+    }
+
+    const signed = await client.createOrder(
+      {
+        tokenID: intent.tokenId,
+        price: level.price,
+        size: level.shares,
+        side: Side.BUY,
+      },
+      { tickSize, negRisk }
+    );
 
     const resp = await client.postOrder(signed, OrderType.GTC);
 
